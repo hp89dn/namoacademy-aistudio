@@ -88,10 +88,13 @@ export interface JobStatusResponse {
 
 class CustomApiService {
   private baseUrl: string;
+  private automateApiBaseUrl: string;
 
   constructor() {
     // Configure your custom API base URL here
     this.baseUrl = process.env.CUSTOM_API_BASE_URL || 'https://namoacademy-e4bc7c0813e5.herokuapp.com/api';
+    // Configure automate API base URL
+    this.automateApiBaseUrl = process.env.AUTOMATE_API_BASE_URL || 'https://h1my1fq1g0.execute-api.us-east-1.amazonaws.com/prod';
   }
 
   /**
@@ -242,7 +245,7 @@ class CustomApiService {
     const maxPollAttempts = options?.maxPollAttempts || 150;
 
     // Step 1: Submit the job
-    const automateUrl = 'https://h1my1fq1g0.execute-api.us-east-1.amazonaws.com/prod/create';
+    const automateUrl = `${this.automateApiBaseUrl}/create`;
     const submitResponse = await fetch(automateUrl, {
       method: 'POST',
       headers: {
@@ -264,7 +267,7 @@ class CustomApiService {
 
     // Step 2: Poll for job completion
     const jobId = jobData.job_id;
-    const jobUrl = `https://h1my1fq1g0.execute-api.us-east-1.amazonaws.com/prod/job/${jobId}`;
+    const jobUrl = `${this.automateApiBaseUrl}/job/${jobId}`;
     
     let attempts = 0;
     while (attempts < maxPollAttempts) {
