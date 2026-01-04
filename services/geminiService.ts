@@ -1,11 +1,10 @@
-import { GoogleGenAI, Modality, GenerateContentResponse } from "@google/genai";
+import { createCustomApiService, type GenerateContentResponse } from "./customApiService";
 import type { SourceImage, ObjectTransform, AspectRatio, ImageSize } from '../types';
 import { translations } from '../locales/translations';
 import { padImageToAspectRatioWithColor } from "../utils";
 import { ensureBase64 } from "./imageService";
-
-// FIX: Removed global 'ai' instance and API_KEY constant to adhere to guidelines.
-// GoogleGenAI instances must be created right before making an API call using process.env.API_KEY.
+import { uploadImageToCloud } from "./storageService";
+import { v4 as uuidv4 } from 'uuid';
 
 function formatPrompt(template: string, ...args: any[]): string {
     if (!template) return '';
@@ -51,6 +50,24 @@ const extractBase64Image = (response: GenerateContentResponse): string | null =>
   return null;
 };
 
+/**
+ * Converts a SourceImage to a URL string.
+ * If the image has base64 data, it uploads it to cloud storage first.
+ */
+const sourceImageToUrl = async (sourceImage: SourceImage): Promise<string> => {
+  if (sourceImage.url) {
+    return sourceImage.url;
+  }
+  
+  if (sourceImage.base64) {
+    // Upload base64 image to get a URL
+    const path = `temp/${uuidv4()}.${sourceImage.mimeType.includes('png') ? 'png' : 'jpg'}`;
+    return await uploadImageToCloud(path, sourceImage.base64, sourceImage.mimeType);
+  }
+  
+  throw new Error("SourceImage has neither URL nor base64 data");
+};
+
 export const generateImages = async (
   sourceImage: SourceImage | null,
   prompt: string,
@@ -62,75 +79,167 @@ export const generateImages = async (
   modelName: string = 'gemini-2.5-flash-image',
   imageSize: ImageSize = '1K'
 ): Promise<string[]> => {
-  // FIX: Using process.env.API_KEY directly as a hard requirement.
-  if (!process.env.API_KEY) throw new Error("API_KEY is not configured.");
-
-  const results: (string | null)[] = [];
-  let finalAspectRatio = aspectRatio;
-  if (finalAspectRatio === 'auto') {
-      if (sourceImage) finalAspectRatio = await getClosestAspectRatio(sourceImage);
-      else finalAspectRatio = '4:3';
-  }
-
-  const imageConfig: any = { aspectRatio: finalAspectRatio };
-  if (modelName === 'gemini-3-pro-image-preview') imageConfig.imageSize = imageSize;
-
-  for (let i = 0; i < count; i++) {
+  // Use new automate API if there's a source image and no reference image
+  // Otherwise fall back to the old method
+  if (sourceImage && !referenceImage) {
     try {
-      let parts: any[] = [];
-      let engineeredPrompt = prompt;
-
-      if (sourceImage) {
-        const sourceBase64 = await ensureBase64(sourceImage);
-        parts.push({
-          inlineData: {
-            data: sourceBase64,
-            mimeType: sourceImage.mimeType,
-          },
-        });
-
-        if (referenceImage) {
-            const refBase64 = await ensureBase64(referenceImage);
-            parts.push({
-                inlineData: {
-                    data: refBase64,
-                    mimeType: referenceImage.mimeType,
-                },
-            });
-            const template = (negativePrompt && negativePrompt.trim() !== '')
-                ? translations[lang].engineeredPrompts.generateWithReferenceNegative
-                : translations[lang].engineeredPrompts.generateWithReference;
-            engineeredPrompt = formatPrompt(template, prompt, negativePrompt);
-        } else {
-            const template = (negativePrompt && negativePrompt.trim() !== '')
-                ? translations[lang].engineeredPrompts.generateWithoutReferenceNegative
-                : translations[lang].engineeredPrompts.generateWithoutReference;
-            engineeredPrompt = formatPrompt(template, prompt, negativePrompt);
-        }
+      const results: string[] = [];
+      const apiService = createCustomApiService();
+      
+      // Convert source image to URL
+      const imageUrl = await sourceImageToUrl(sourceImage);
+      
+      // Build the prompt with negative prompt if provided (always use English)
+      let finalPrompt = prompt;
+      if (negativePrompt && negativePrompt.trim() !== '') {
+        const template = translations.en.engineeredPrompts.generateWithoutReferenceNegative;
+        finalPrompt = formatPrompt(template, prompt, negativePrompt);
       } else {
-          if (negativePrompt && negativePrompt.trim() !== '') {
-              engineeredPrompt = `${prompt} (Do not include: ${negativePrompt})`;
-          }
+        const template = translations.en.engineeredPrompts.generateWithoutReference;
+        finalPrompt = formatPrompt(template, prompt);
       }
 
-      parts.push({ text: engineeredPrompt });
+      // Generate images using the automate API
+      for (let i = 0; i < count; i++) {
+        try {
+          const generatedImageUrl = await apiService.generateImageAutomate(
+            {
+              image_url: imageUrl,
+              prompt: finalPrompt
+            },
+            {
+              onProgress: (progress, status) => {
+                console.log(`Image ${i + 1}/${count} - Progress: ${progress}%, Status: ${status}`);
+              }
+            }
+          );
+          results.push(generatedImageUrl);
+        } catch (error) {
+          console.error(`Failed to generate image ${i + 1}/${count} with automate API:`, error);
+          // Fall back to old method if automate API fails
+          throw error;
+        }
+      }
 
-      // FIX: Creating ai instance right before API call
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      const response = await ai.models.generateContent({
-        model: modelName,
-        contents: { parts },
-        config: {
-          imageConfig: imageConfig
-        },
-      });
-      results.push(extractBase64Image(response));
+      return results;
     } catch (error) {
-      console.error(`Failed to generate image ${i + 1}/${count}:`, error);
+      console.warn("Automate API failed, falling back to old method:", error);
+      // Fall through to old method
     }
   }
 
-  return results.filter((result): result is string => result !== null);
+  // Fall back to old method for cases with reference images or no source image
+  // Try to use automate API even with reference images or no source image
+  const results: string[] = [];
+  const apiService = createCustomApiService();
+
+  // For cases with reference images, we can't use automate API (it doesn't support reference images)
+  // For cases without source image, we can't use automate API (it requires an image)
+  // So we keep the old method for these cases
+  if (!sourceImage || referenceImage) {
+    const fallbackResults: (string | null)[] = [];
+    let finalAspectRatio = aspectRatio;
+    if (finalAspectRatio === 'auto') {
+        if (sourceImage) finalAspectRatio = await getClosestAspectRatio(sourceImage);
+        else finalAspectRatio = '4:3';
+    }
+
+    const imageConfig: any = { aspectRatio: finalAspectRatio };
+    if (modelName === 'gemini-3-pro-image-preview') imageConfig.imageSize = imageSize;
+
+    for (let i = 0; i < count; i++) {
+      try {
+        let parts: any[] = [];
+        let engineeredPrompt = prompt;
+
+        if (sourceImage) {
+          const sourceBase64 = await ensureBase64(sourceImage);
+          parts.push({
+            inlineData: {
+              data: sourceBase64,
+              mimeType: sourceImage.mimeType,
+            },
+          });
+
+          if (referenceImage) {
+              const refBase64 = await ensureBase64(referenceImage);
+              parts.push({
+                  inlineData: {
+                      data: refBase64,
+                      mimeType: referenceImage.mimeType,
+                  },
+              });
+              const template = (negativePrompt && negativePrompt.trim() !== '')
+                  ? translations.en.engineeredPrompts.generateWithReferenceNegative
+                  : translations.en.engineeredPrompts.generateWithReference;
+              engineeredPrompt = formatPrompt(template, prompt, negativePrompt);
+          } else {
+              const template = (negativePrompt && negativePrompt.trim() !== '')
+                  ? translations.en.engineeredPrompts.generateWithoutReferenceNegative
+                  : translations.en.engineeredPrompts.generateWithoutReference;
+              engineeredPrompt = formatPrompt(template, prompt, negativePrompt);
+          }
+        } else {
+            if (negativePrompt && negativePrompt.trim() !== '') {
+                engineeredPrompt = `${prompt} (Do not include: ${negativePrompt})`;
+            }
+        }
+
+        parts.push({ text: engineeredPrompt });
+
+        // Using custom API service (old method for unsupported cases)
+        const response = await apiService.generateContent({
+          model: modelName,
+          contents: { parts },
+          config: {
+            imageConfig: imageConfig
+          },
+        });
+        fallbackResults.push(extractBase64Image(response));
+      } catch (error) {
+        console.error(`Failed to generate image ${i + 1}/${count}:`, error);
+      }
+    }
+
+    return fallbackResults.filter((result): result is string => result !== null);
+  }
+
+  // For cases with source image but no reference image, use automate API
+  try {
+    const imageUrl = await sourceImageToUrl(sourceImage!);
+    
+    let finalPrompt = prompt;
+    if (negativePrompt && negativePrompt.trim() !== '') {
+      const template = translations.en.engineeredPrompts.generateWithoutReferenceNegative;
+      finalPrompt = formatPrompt(template, prompt, negativePrompt);
+    } else {
+      const template = translations.en.engineeredPrompts.generateWithoutReference;
+      finalPrompt = formatPrompt(template, prompt);
+    }
+
+    for (let i = 0; i < count; i++) {
+      try {
+        const generatedImageUrl = await apiService.generateImageAutomate(
+          {
+            image_url: imageUrl,
+            prompt: finalPrompt
+          },
+          {
+            onProgress: (progress, status) => {
+              console.log(`Image ${i + 1}/${count} - Progress: ${progress}%, Status: ${status}`);
+            }
+          }
+        );
+        results.push(generatedImageUrl);
+      } catch (error) {
+        console.error(`Failed to generate image ${i + 1}/${count} with automate API:`, error);
+      }
+    }
+  } catch (error) {
+    console.error("Failed to use automate API:", error);
+  }
+
+  return results;
 };
 
 export const generateSketch = async (
@@ -138,30 +247,30 @@ export const generateSketch = async (
     lang: 'vi' | 'en' = 'vi',
     modelName: string = 'gemini-2.5-flash-image'
 ): Promise<string[]> => {
-    if (!process.env.API_KEY) throw new Error("API_KEY is not configured.");
-
-    const sourceBase64 = await ensureBase64(sourceImage);
-    const engineeredPrompt = translations[lang].engineeredPrompts.generateSketch;
-    const aspectRatio = await getClosestAspectRatio(sourceImage);
-
+    // Use new automate API for sketch generation (always use English)
+    const apiService = createCustomApiService();
+    const engineeredPrompt = translations.en.engineeredPrompts.generateSketch;
+    
     try {
-        const parts = [
-            { inlineData: { data: sourceBase64, mimeType: sourceImage.mimeType } },
-            { text: engineeredPrompt }
-        ];
-
-        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-        const response = await ai.models.generateContent({
-            model: modelName,
-            contents: { parts },
-            config: {
-                imageConfig: { aspectRatio }
+        // Convert source image to URL
+        const imageUrl = await sourceImageToUrl(sourceImage);
+        
+        // Generate sketch using the automate API
+        const generatedImageUrl = await apiService.generateImageAutomate(
+            {
+                image_url: imageUrl,
+                prompt: engineeredPrompt
             },
-        });
-        const result = extractBase64Image(response);
-        return result ? [result] : [];
+            {
+                onProgress: (progress, status) => {
+                    console.log(`Sketch generation - Progress: ${progress}%, Status: ${status}`);
+                }
+            }
+        );
+        
+        return [generatedImageUrl];
     } catch (error) {
-        console.error("Failed to generate sketch:", error);
+        console.error("Failed to generate sketch with automate API:", error);
         throw error;
     }
 };
@@ -172,7 +281,6 @@ export const generateVideo = async (
   model: string,
   onProgress: (message: string) => void
 ): Promise<string> => {
-  if (!process.env.API_KEY) throw new Error("API_KEY is not configured.");
   const progressMessages = [
     "AI is warming up the virtual cameras...",
     "Analyzing the scene and your prompt...",
@@ -187,9 +295,9 @@ export const generateVideo = async (
     const veoModel = model.includes('veo') ? 'veo-3.1-fast-generate-preview' : model;
     const base64 = await ensureBase64(sourceImage);
     
-    // FIX: Creating ai instance right before API call
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-    let operation = await ai.models.generateVideos({
+    // Using custom API service
+    const apiService = createCustomApiService();
+    let operation = await apiService.generateVideos({
       model: veoModel,
       prompt: prompt,
       image: {
@@ -206,15 +314,14 @@ export const generateVideo = async (
       await new Promise(resolve => setTimeout(resolve, 10000));
       messageIndex = (messageIndex + 1) % progressMessages.length;
       onProgress(progressMessages[messageIndex]);
-      operation = await ai.operations.getVideosOperation({ operation: operation });
+      operation = await apiService.getVideosOperation({ operation: operation });
     }
 
     onProgress("Video generated! Downloading...");
     const downloadLink = operation.response?.generatedVideos?.[0]?.video?.uri;
     if (!downloadLink) throw new Error("Video generation succeeded but no download link was found.");
     
-    // FIX: Appending process.env.API_KEY to download link
-    const response = await fetch(`${downloadLink}&key=${process.env.API_KEY}`);
+    const response = await fetch(downloadLink);
     if (!response.ok) throw new Error(`Failed to download video: ${response.statusText}`);
 
     const videoBlob = await response.blob();
@@ -230,19 +337,17 @@ export const generateVideo = async (
 export const classifyImageType = async (
   sourceImage: SourceImage
 ): Promise<'interior' | 'exterior'> => {
-  if (!process.env.API_KEY) throw new Error("API_KEY is not configured.");
-
   try {
     const base64 = await ensureBase64(sourceImage);
-    const engineeredPrompt = translations.vi.engineeredPrompts.classifyImageTypePrompt;
+    const engineeredPrompt = translations.en.engineeredPrompts.classifyImageTypePrompt;
     const parts: any[] = [
       { inlineData: { data: base64, mimeType: sourceImage.mimeType } },
       { text: engineeredPrompt },
     ];
 
-    // FIX: Creating ai instance right before API call and using .text property correctly
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-    const response = await ai.models.generateContent({
+    // Using custom API service
+    const apiService = createCustomApiService();
+    const response = await apiService.generateContent({
       model: 'gemini-3-flash-preview',
       contents: { parts },
     });
@@ -259,20 +364,18 @@ export const generatePromptFromImage = async (
   lang: 'vi' | 'en' = 'vi',
   imageType: 'interior' | 'exterior' = 'exterior'
 ): Promise<string> => {
-  if (!process.env.API_KEY) throw new Error("API_KEY is not configured.");
-
   try {
     const base64 = await ensureBase64(sourceImage);
     const templateKey = imageType === 'interior' ? 'generateFromImageInterior' : 'generateFromImage';
-    const engineeredPrompt = translations[lang].engineeredPrompts[templateKey];
+    const engineeredPrompt = translations.en.engineeredPrompts[templateKey];
     const parts: any[] = [
       { inlineData: { data: base64, mimeType: sourceImage.mimeType } },
       { text: engineeredPrompt },
     ];
 
-    // FIX: Creating ai instance right before API call and using .text property correctly
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-    const response = await ai.models.generateContent({
+    // Using custom API service
+    const apiService = createCustomApiService();
+    const response = await apiService.generateContent({
       model: 'gemini-3-flash-preview',
       contents: { parts },
     });
@@ -288,18 +391,16 @@ export const generatePromptFromKeywords = async (
   lang: 'vi' | 'en' = 'vi',
   imageType: 'interior' | 'exterior' = 'exterior'
 ): Promise<string> => {
-  if (!process.env.API_KEY) throw new Error("API_KEY is not configured.");
-  
   const templateKey = imageType === 'interior' ? 'generateFromKeywordsInterior' : 'generateFromKeywords';
-  const template = translations[lang].engineeredPrompts[templateKey];
+  const template = translations.en.engineeredPrompts[templateKey];
   const engineeredPrompt = formatPrompt(template, keywords);
 
   try {
-    // FIX: Creating ai instance right before API call and using .text property correctly
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-    const response = await ai.models.generateContent({
+    // Using custom API service
+    const apiService = createCustomApiService();
+    const response = await apiService.generateContent({
       model: 'gemini-3-flash-preview',
-      contents: engineeredPrompt,
+      contents: { parts: [{ text: engineeredPrompt }] },
     });
     return response.text?.trim() || '';
   } catch (error) {
@@ -316,8 +417,9 @@ export const editImage = async (
   referenceImage: SourceImage | null = null,
   lang: 'vi' | 'en' = 'vi'
 ): Promise<string[]> => {
-  if (!process.env.API_KEY) throw new Error("API_KEY is not configured.");
-
+  // Note: Automate API doesn't support mask images or reference images
+  // So we use it only when there's no reference image and no mask
+  // For now, we'll use the old method since mask is required for editImage
   const results: (string | null)[] = [];
   const sourceBase64 = await ensureBase64(sourceImage);
   const maskBase64 = await ensureBase64(maskImage);
@@ -332,19 +434,19 @@ export const editImage = async (
     if (referenceImage) {
         const refBase64 = await ensureBase64(referenceImage);
         parts.push({ inlineData: { data: refBase64, mimeType: referenceImage.mimeType } });
-        const template = translations[lang].engineeredPrompts.editWithReference;
+        const template = translations.en.engineeredPrompts.editWithReference;
         engineeredPrompt = formatPrompt(template, prompt);
     } else {
-        const template = translations[lang].engineeredPrompts.editWithoutReference;
+        const template = translations.en.engineeredPrompts.editWithoutReference;
         engineeredPrompt = formatPrompt(template, prompt);
     }
     
     parts.push({ text: engineeredPrompt });
     
     try {
-        // FIX: Creating ai instance right before API call
-        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-        const response = await ai.models.generateContent({
+        // Using custom API service (old method - automate API doesn't support masks)
+        const apiService = createCustomApiService();
+        const response = await apiService.generateContent({
             model: 'gemini-2.5-flash-image',
             contents: { parts },
           }
@@ -363,32 +465,77 @@ export const mergeImages = async (
   prompt: string,
   count: number = 2,
 ): Promise<string[]> => {
-  if (!process.env.API_KEY) throw new Error("API_KEY is not configured.");
+  // Note: Automate API only supports one image, so we use the first image
+  // and include merge instruction in the prompt
+  const results: string[] = [];
+  const apiService = createCustomApiService();
 
-  const results: (string | null)[] = [];
-  const base64_1 = await ensureBase64(image1);
-  const base64_2 = await ensureBase64(image2);
+  try {
+    const imageUrl = await sourceImageToUrl(image1);
+    // Include merge instruction in prompt
+    const mergePrompt = `Merge with the second image: ${prompt}`;
 
-  for (let i = 0; i < count; i++) {
-    const parts: any[] = [
-      { inlineData: { data: base64_1, mimeType: image1.mimeType } },
-      { inlineData: { data: base64_2, mimeType: image2.mimeType } },
-      { text: prompt },
-    ];
-
-    try {
-      // FIX: Creating ai instance right before API call
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash-image',
-        contents: { parts },
-      });
-      results.push(extractBase64Image(response));
-    } catch (error) {
-      console.error(`Failed to generate merged image ${i + 1}/${count}:`, error);
+    for (let i = 0; i < count; i++) {
+      try {
+        const generatedImageUrl = await apiService.generateImageAutomate(
+          {
+            image_url: imageUrl,
+            prompt: mergePrompt
+          },
+          {
+            onProgress: (progress, status) => {
+              console.log(`Merged image ${i + 1}/${count} - Progress: ${progress}%, Status: ${status}`);
+            }
+          }
+        );
+        results.push(generatedImageUrl);
+      } catch (error) {
+        console.error(`Failed to generate merged image ${i + 1}/${count} with automate API:`, error);
+        // Fall back to old method
+        const base64_1 = await ensureBase64(image1);
+        const base64_2 = await ensureBase64(image2);
+        const parts: any[] = [
+          { inlineData: { data: base64_1, mimeType: image1.mimeType } },
+          { inlineData: { data: base64_2, mimeType: image2.mimeType } },
+          { text: prompt },
+        ];
+        const response = await apiService.generateContent({
+          model: 'gemini-2.5-flash-image',
+          contents: { parts },
+        });
+        const result = extractBase64Image(response);
+        if (result) results.push(result);
+      }
     }
+  } catch (error) {
+    console.warn("Automate API failed for merge, using old method:", error);
+    // Fall back to old method
+    const base64_1 = await ensureBase64(image1);
+    const base64_2 = await ensureBase64(image2);
+    const fallbackResults: (string | null)[] = [];
+
+    for (let i = 0; i < count; i++) {
+      const parts: any[] = [
+        { inlineData: { data: base64_1, mimeType: image1.mimeType } },
+        { inlineData: { data: base64_2, mimeType: image2.mimeType } },
+        { text: prompt },
+      ];
+
+      try {
+        const apiService = createCustomApiService();
+        const response = await apiService.generateContent({
+          model: 'gemini-2.5-flash-image',
+          contents: { parts },
+        });
+        fallbackResults.push(extractBase64Image(response));
+      } catch (error) {
+        console.error(`Failed to generate merged image ${i + 1}/${count}:`, error);
+      }
+    }
+    return fallbackResults.filter((result): result is string => result !== null);
   }
-  return results.filter((result): result is string => result !== null);
+
+  return results;
 };
 
 export const placeAndRenderFurniture = async (
@@ -397,13 +544,7 @@ export const placeAndRenderFurniture = async (
   count: number = 2,
   lang: 'vi' | 'en' = 'vi'
 ): Promise<string[]> => {
-  if (!process.env.API_KEY) throw new Error("API_KEY is not configured.");
   if (placements.length === 0) return [];
-
-  const bgBase64 = await ensureBase64(bgImage);
-  const placementParts = await Promise.all(placements.map(async p => ({
-      inlineData: { data: await ensureBase64(p.image), mimeType: p.image.mimeType }
-  })));
 
   const simplifiedPlacements = placements.map(({ transform }) => ({
     pos: { x: transform.x.toFixed(2), y: transform.y.toFixed(2) },
@@ -415,48 +556,95 @@ export const placeAndRenderFurniture = async (
     }
   }));
 
-  const template = translations[lang].engineeredPrompts.placeAndRenderFurniture;
+  const template = translations.en.engineeredPrompts.placeAndRenderFurniture;
   const engineeredPrompt = formatPrompt(template, JSON.stringify(simplifiedPlacements, null, 2));
 
-  const results: (string | null)[] = [];
-  for (let i = 0; i < count; i++) {
-    const parts: any[] = [
-        { inlineData: { data: bgBase64, mimeType: bgImage.mimeType } },
-        ...placementParts,
-        { text: engineeredPrompt },
-    ];
-    
-    try {
-        // FIX: Creating ai instance right before API call
-        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-        const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash-image',
-            contents: { parts },
+  const results: string[] = [];
+  const apiService = createCustomApiService();
+
+  try {
+    const imageUrl = await sourceImageToUrl(bgImage);
+
+    for (let i = 0; i < count; i++) {
+      try {
+        const generatedImageUrl = await apiService.generateImageAutomate(
+          {
+            image_url: imageUrl,
+            prompt: engineeredPrompt
+          },
+          {
+            onProgress: (progress, status) => {
+              console.log(`Furniture placement ${i + 1}/${count} - Progress: ${progress}%, Status: ${status}`);
+            }
+          }
+        );
+        results.push(generatedImageUrl);
+      } catch (error) {
+        console.error(`Failed to generate canva image ${i + 1}/${count} with automate API:`, error);
+        // Fall back to old method
+        const bgBase64 = await ensureBase64(bgImage);
+        const placementParts = await Promise.all(placements.map(async p => ({
+            inlineData: { data: await ensureBase64(p.image), mimeType: p.image.mimeType }
+        })));
+        const parts: any[] = [
+            { inlineData: { data: bgBase64, mimeType: bgImage.mimeType } },
+            ...placementParts,
+            { text: engineeredPrompt },
+        ];
+        const response = await apiService.generateContent({
+          model: 'gemini-2.5-flash-image',
+          contents: { parts },
         });
-        results.push(extractBase64Image(response));
-    } catch (error) {
-        console.error(`Failed to generate canva image ${i + 1}/${count}:`, error);
+        const result = extractBase64Image(response);
+        if (result) results.push(result);
+      }
     }
+  } catch (error) {
+    console.warn("Automate API failed for furniture placement, using old method:", error);
+    // Fall back to old method
+    const bgBase64 = await ensureBase64(bgImage);
+    const placementParts = await Promise.all(placements.map(async p => ({
+        inlineData: { data: await ensureBase64(p.image), mimeType: p.image.mimeType }
+    })));
+    const fallbackResults: (string | null)[] = [];
+
+    for (let i = 0; i < count; i++) {
+      const parts: any[] = [
+          { inlineData: { data: bgBase64, mimeType: bgImage.mimeType } },
+          ...placementParts,
+          { text: engineeredPrompt },
+      ];
+      
+      try {
+        const response = await apiService.generateContent({
+          model: 'gemini-2.5-flash-image',
+          contents: { parts },
+        });
+        fallbackResults.push(extractBase64Image(response));
+      } catch (error) {
+          console.error(`Failed to generate canva image ${i + 1}/${count}:`, error);
+      }
+    }
+    return fallbackResults.filter((result): result is string => result !== null);
   }
-  return results.filter((result): result is string => result !== null);
+
+  return results;
 };
 
 export const analyzeCharacterImage = async (
     characterImage: SourceImage,
     lang: 'vi' | 'en' = 'vi'
 ): Promise<string> => {
-    if (!process.env.API_KEY) throw new Error("API_KEY is not configured.");
-
     try {
         const base64 = await ensureBase64(characterImage);
-        const engineeredPrompt = translations[lang].engineeredPrompts.analyzeCharacterPrompt;
+        const engineeredPrompt = translations.en.engineeredPrompts.analyzeCharacterPrompt;
         const parts: any[] = [
             { inlineData: { data: base64, mimeType: characterImage.mimeType } },
             { text: engineeredPrompt },
         ];
-        // FIX: Creating ai instance right before API call and using .text property correctly
-        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-        const response = await ai.models.generateContent({
+        // Using custom API service
+        const apiService = createCustomApiService();
+        const response = await apiService.generateContent({
             model: 'gemini-3-flash-preview',
             contents: { parts },
         });
@@ -471,18 +659,16 @@ export const analyzeImageArea = async (
     areaImage: SourceImage,
     lang: 'vi' | 'en' = 'vi'
 ): Promise<string> => {
-    if (!process.env.API_KEY) throw new Error("API_KEY is not configured.");
-
     try {
         const base64 = await ensureBase64(areaImage);
-        const engineeredPrompt = translations[lang].engineeredPrompts.analyzeAreaPrompt;
+        const engineeredPrompt = translations.en.engineeredPrompts.analyzeAreaPrompt;
         const parts: any[] = [
             { inlineData: { data: base64, mimeType: areaImage.mimeType } },
             { text: engineeredPrompt },
         ];
-        // FIX: Creating ai instance right before API call and using .text property correctly
-        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-        const response = await ai.models.generateContent({
+        // Using custom API service
+        const apiService = createCustomApiService();
+        const response = await apiService.generateContent({
             model: 'gemini-3-flash-preview',
             contents: { parts },
         });
@@ -498,20 +684,18 @@ export const generateArchitecturalPrompts = async (
     lang: 'vi' | 'en' = 'vi',
     characterDescription: string = ''
 ): Promise<string> => {
-    if (!process.env.API_KEY) throw new Error("API_KEY is not configured.");
-
     try {
         const base64 = await ensureBase64(sourceImage);
-        const template = translations[lang].engineeredPrompts.generateArchitecturalPrompts;
+        const template = translations.en.engineeredPrompts.generateArchitecturalPrompts;
         const engineeredPrompt = formatPrompt(template, characterDescription);
         const parts: any[] = [
             { inlineData: { data: base64, mimeType: sourceImage.mimeType } },
             { text: engineeredPrompt },
         ];
 
-        // FIX: Creating ai instance right before API call and using .text property correctly
-        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-        const response = await ai.models.generateContent({
+        // Using custom API service
+        const apiService = createCustomApiService();
+        const response = await apiService.generateContent({
             model: 'gemini-3-pro-preview',
             contents: { parts },
         });
@@ -530,18 +714,16 @@ export const generatePromptFromPlan = async (
   sourceImage: SourceImage,
   lang: 'vi' | 'en' = 'vi'
 ): Promise<string> => {
-  if (!process.env.API_KEY) throw new Error("API_KEY is not configured.");
-
   try {
     const base64 = await ensureBase64(sourceImage);
-    const engineeredPrompt = translations[lang].engineeredPrompts.generateFromPlan;
+    const engineeredPrompt = translations.en.engineeredPrompts.generateFromPlan;
     const parts: any[] = [
       { inlineData: { data: base64, mimeType: sourceImage.mimeType } },
       { text: engineeredPrompt },
     ];
-    // FIX: Creating ai instance right before API call and using .text property correctly
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-    const response = await ai.models.generateContent({
+    // Using custom API service
+    const apiService = createCustomApiService();
+    const response = await apiService.generateContent({
       model: 'gemini-3-flash-preview',
       contents: { parts },
     });
@@ -559,9 +741,42 @@ export const generateMoodboard = async (
   imageCount: number,
   lang: 'vi' | 'en' = 'vi'
 ): Promise<string[]> => {
-  if (!process.env.API_KEY) throw new Error("API_KEY is not configured.");
+  const results: string[] = [];
+  const apiService = createCustomApiService();
 
-  const results: (string | null)[] = [];
+  // Use automate API if no reference image, otherwise fall back to old method
+  if (!referenceImage) {
+    try {
+      const imageUrl = await sourceImageToUrl(sourceImage);
+      const template = translations.en.engineeredPrompts.generateMoodboard;
+      const engineeredPrompt = formatPrompt(template, userPrompt);
+
+      for (let i = 0; i < imageCount; i++) {
+        try {
+          const generatedImageUrl = await apiService.generateImageAutomate(
+            {
+              image_url: imageUrl,
+              prompt: engineeredPrompt
+            },
+            {
+              onProgress: (progress, status) => {
+                console.log(`Moodboard ${i + 1}/${imageCount} - Progress: ${progress}%, Status: ${status}`);
+              }
+            }
+          );
+          results.push(generatedImageUrl);
+        } catch (error) {
+          console.error(`Failed to generate moodboard ${i + 1}/${imageCount} with automate API:`, error);
+        }
+      }
+      return results;
+    } catch (error) {
+      console.warn("Automate API failed for moodboard, using old method:", error);
+    }
+  }
+
+  // Fall back to old method for reference images or if automate API fails
+  const fallbackResults: (string | null)[] = [];
   const sourceBase64 = await ensureBase64(sourceImage);
 
   for (let i = 0; i < imageCount; i++) {
@@ -573,28 +788,26 @@ export const generateMoodboard = async (
     if (referenceImage) {
       const refBase64 = await ensureBase64(referenceImage);
       parts.push({ inlineData: { data: refBase64, mimeType: referenceImage.mimeType } });
-      const template = translations[lang].engineeredPrompts.generateMoodboardWithReference;
+      const template = translations.en.engineeredPrompts.generateMoodboardWithReference;
       engineeredPrompt = formatPrompt(template, userPrompt);
     } else {
-      const template = translations[lang].engineeredPrompts.generateMoodboard;
+      const template = translations.en.engineeredPrompts.generateMoodboard;
       engineeredPrompt = formatPrompt(template, userPrompt);
     }
 
     parts.push({ text: engineeredPrompt });
     
     try {
-      // FIX: Creating ai instance right before API call
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      const response = await ai.models.generateContent({
+      const response = await apiService.generateContent({
         model: 'gemini-2.5-flash-image',
         contents: { parts },
       });
-      results.push(extractBase64Image(response));
+      fallbackResults.push(extractBase64Image(response));
     } catch (error) {
       console.error(`Failed to generate moodboard ${i + 1}/${imageCount}:`, error);
     }
   }
-  return results.filter((result): result is string => result !== null);
+  return fallbackResults.filter((result): result is string => result !== null);
 };
 
 export const applyLighting = async (
@@ -603,32 +816,70 @@ export const applyLighting = async (
   imageCount: number,
   lang: 'vi' | 'en' = 'vi'
 ): Promise<string[]> => {
-  if (!process.env.API_KEY) throw new Error("API_KEY is not configured.");
-
-  const results: (string | null)[] = [];
-  const base64 = await ensureBase64(sourceImage);
-  const template = translations[lang].engineeredPrompts.applyLighting;
+  const results: string[] = [];
+  const apiService = createCustomApiService();
+  const template = translations.en.engineeredPrompts.applyLighting;
   const engineeredPrompt = formatPrompt(template, lightingPrompt);
 
-  for (let i = 0; i < imageCount; i++) {
-    const parts: any[] = [
-      { inlineData: { data: base64, mimeType: sourceImage.mimeType } },
-      { text: engineeredPrompt }
-    ];
-    
-    try {
-      // FIX: Creating ai instance right before API call
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash-image',
-        contents: { parts },
-      });
-      results.push(extractBase64Image(response));
-    } catch (error) {
-      console.error(`Failed to generate lighting image ${i + 1}/${imageCount}:`, error);
+  try {
+    const imageUrl = await sourceImageToUrl(sourceImage);
+
+    for (let i = 0; i < imageCount; i++) {
+      try {
+        const generatedImageUrl = await apiService.generateImageAutomate(
+          {
+            image_url: imageUrl,
+            prompt: engineeredPrompt
+          },
+          {
+            onProgress: (progress, status) => {
+              console.log(`Lighting ${i + 1}/${imageCount} - Progress: ${progress}%, Status: ${status}`);
+            }
+          }
+        );
+        results.push(generatedImageUrl);
+      } catch (error) {
+        console.error(`Failed to generate lighting image ${i + 1}/${imageCount} with automate API:`, error);
+        // Fall back to old method
+        const base64 = await ensureBase64(sourceImage);
+        const parts: any[] = [
+          { inlineData: { data: base64, mimeType: sourceImage.mimeType } },
+          { text: engineeredPrompt }
+        ];
+        const response = await apiService.generateContent({
+          model: 'gemini-2.5-flash-image',
+          contents: { parts },
+        });
+        const result = extractBase64Image(response);
+        if (result) results.push(result);
+      }
     }
+  } catch (error) {
+    console.warn("Automate API failed for lighting, using old method:", error);
+    // Fall back to old method
+    const base64 = await ensureBase64(sourceImage);
+    const fallbackResults: (string | null)[] = [];
+
+    for (let i = 0; i < imageCount; i++) {
+      const parts: any[] = [
+        { inlineData: { data: base64, mimeType: sourceImage.mimeType } },
+        { text: engineeredPrompt }
+      ];
+      
+      try {
+        const response = await apiService.generateContent({
+          model: 'gemini-2.5-flash-image',
+          contents: { parts },
+        });
+        fallbackResults.push(extractBase64Image(response));
+      } catch (error) {
+        console.error(`Failed to generate lighting image ${i + 1}/${imageCount}:`, error);
+      }
+    }
+    return fallbackResults.filter((result): result is string => result !== null);
   }
-  return results.filter((result): result is string => result !== null);
+
+  return results;
 };
 
 export const generateVideoScriptPrompt = async (
@@ -636,8 +887,6 @@ export const generateVideoScriptPrompt = async (
   userPrompt: string,
   lang: 'vi' | 'en' = 'vi'
 ): Promise<string> => {
-  if (!process.env.API_KEY) throw new Error("API_KEY is not configured.");
-  
   try {
     const base64 = await ensureBase64(sourceImage);
     const engineeredPrompt = `hãy đóng vai một đạo diễn chuyên về quay phim kiến trúc,nội thất với hơn 20 năm kinh nghiệm và một chuyên gia viết promt chuyển từ ảnh thành video ngắn cho các ai kling và veo 3, bạn có kinh nghiệm về các góc camera, chuyển động của ánh sáng, bố cục và dựa vào tài liệu hàng đầu về nhiếp ảnh kiến trúc, nội thất. Khi tôi tải ảnh lên + yêu cầu bằng tiếng việt bạn hãy đựa vào đó viết promt tạo chuyển động cho ảnh theo chỉ định bằng tiếng anh, chỉ hiện promt ko hiện phân tích. Yêu cầu của người dùng là: "${userPrompt}"`;
@@ -646,9 +895,9 @@ export const generateVideoScriptPrompt = async (
       { text: engineeredPrompt },
     ];
 
-    // FIX: Creating ai instance right before API call and using .text property correctly
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-    const response = await ai.models.generateContent({
+    // Using custom API service
+    const apiService = createCustomApiService();
+    const response = await apiService.generateContent({
       model: 'gemini-3-pro-preview',
       contents: { parts },
     });
@@ -671,34 +920,71 @@ export const extendView = async (
   imageCount: number,
   lang: 'vi' | 'en' = 'vi'
 ): Promise<string[]> => {
-  if (!process.env.API_KEY) throw new Error("API_KEY is not configured.");
-  
   const targetAspectRatio = parseAspectRatio(targetAspectRatioLabel);
   const paddedImage = await padImageToAspectRatioWithColor(sourceImage, targetAspectRatio, '#FF00FF');
-  const base64 = await ensureBase64(paddedImage);
-  
-  const results: (string | null)[] = [];
-  const engineeredPrompt = translations[lang].engineeredPrompts.extendView;
+  const results: string[] = [];
+  const apiService = createCustomApiService();
+  const engineeredPrompt = translations.en.engineeredPrompts.extendView;
 
-  for (let i = 0; i < imageCount; i++) {
-    const parts: any[] = [
-      { inlineData: { data: base64, mimeType: paddedImage.mimeType } },
-      { text: engineeredPrompt }
-    ];
-    
-    try {
-      // FIX: Creating ai instance right before API call
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash-image',
-        contents: { parts },
-      });
-      results.push(extractBase64Image(response));
-    } catch (error) {
-      console.error(`Failed to generate extended view image ${i + 1}/${imageCount}:`, error);
+  try {
+    const imageUrl = await sourceImageToUrl(paddedImage);
+
+    for (let i = 0; i < imageCount; i++) {
+      try {
+        const generatedImageUrl = await apiService.generateImageAutomate(
+          {
+            image_url: imageUrl,
+            prompt: engineeredPrompt
+          },
+          {
+            onProgress: (progress, status) => {
+              console.log(`Extended view ${i + 1}/${imageCount} - Progress: ${progress}%, Status: ${status}`);
+            }
+          }
+        );
+        results.push(generatedImageUrl);
+      } catch (error) {
+        console.error(`Failed to generate extended view image ${i + 1}/${imageCount} with automate API:`, error);
+        // Fall back to old method
+        const base64 = await ensureBase64(paddedImage);
+        const parts: any[] = [
+          { inlineData: { data: base64, mimeType: paddedImage.mimeType } },
+          { text: engineeredPrompt }
+        ];
+        const response = await apiService.generateContent({
+          model: 'gemini-2.5-flash-image',
+          contents: { parts },
+        });
+        const result = extractBase64Image(response);
+        if (result) results.push(result);
+      }
     }
+  } catch (error) {
+    console.warn("Automate API failed for extend view, using old method:", error);
+    // Fall back to old method
+    const base64 = await ensureBase64(paddedImage);
+    const fallbackResults: (string | null)[] = [];
+
+    for (let i = 0; i < imageCount; i++) {
+      const parts: any[] = [
+        { inlineData: { data: base64, mimeType: paddedImage.mimeType } },
+        { text: engineeredPrompt }
+      ];
+      
+      try {
+        const response = await apiService.generateContent({
+          model: 'gemini-2.5-flash-image',
+          contents: { parts },
+        });
+        fallbackResults.push(extractBase64Image(response));
+      } catch (error) {
+        console.error(`Failed to generate extended view image ${i + 1}/${imageCount}:`, error);
+      }
+    }
+    return fallbackResults.filter((result): result is string => result !== null);
   }
-  return results.filter((result): result is string => result !== null);
+
+  return results;
 };
 
 export const generateStyleChangePrompt = async (
@@ -706,20 +992,18 @@ export const generateStyleChangePrompt = async (
   userPrompt: string,
   lang: 'vi' | 'en' = 'vi'
 ): Promise<string> => {
-  if (!process.env.API_KEY) throw new Error("API_KEY is not configured.");
-  
   try {
     const base64 = await ensureBase64(sourceImage);
-    const template = translations[lang].engineeredPrompts.changeStylePrompt;
+    const template = translations.en.engineeredPrompts.changeStylePrompt;
     const engineeredPrompt = formatPrompt(template, userPrompt);
     const parts: any[] = [
       { inlineData: { data: base64, mimeType: sourceImage.mimeType } },
       { text: engineeredPrompt },
     ];
 
-    // FIX: Creating ai instance right before API call and using .text property correctly
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-    const response = await ai.models.generateContent({
+    // Using custom API service
+    const apiService = createCustomApiService();
+    const response = await apiService.generateContent({
       model: 'gemini-3-flash-preview',
       contents: { parts },
     });

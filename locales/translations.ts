@@ -819,7 +819,7 @@ Tuyệt đối không thêm lời dẫn, chỉ xuất ra đoạn mô tả chi ti
             generateFromKeywordsInterior: 'Write a detailed prompt for interior design based on keywords: "{0}".',
             generateFromImage: 'Write detailed architectural prompt based on provided image.',
             generateFromKeywords: 'Write detailed architectural prompt based on keywords: "{0}".',
-            generateSketch: `Create an architectural line drawing sketch from this image. Requirements: thin refined lines, professional technical hand-drawn style, pure white background, no shadows, no colors, only black lines on white background.`,
+            generateSketch: `Convert to sketch`,
             editWithReference: `Inpaint masked area with prompt: "{0}" using style reference.`,
             editWithoutReference: `Inpaint masked area with prompt: "{0}".`,
             placeAndRenderFurniture: `Render furniture based on placement JSON: {0}.`,
