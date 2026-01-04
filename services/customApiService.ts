@@ -265,6 +265,9 @@ class CustomApiService {
       throw new Error(`Job submission failed: No job_id returned`);
     }
 
+    // Wait 30 seconds before starting to poll
+    await new Promise(resolve => setTimeout(resolve, 30000));
+
     // Step 2: Poll for job completion
     const jobId = jobData.job_id;
     const jobUrl = `${this.automateApiBaseUrl}/job/${jobId}`;

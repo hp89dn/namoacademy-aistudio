@@ -320,6 +320,10 @@ export const generateVideo = async (
       config: { numberOfVideos: 1 }
     });
 
+    // Wait 30 seconds before starting to poll
+    onProgress("Job submitted, waiting before checking status...");
+    await new Promise(resolve => setTimeout(resolve, 30000));
+
     let messageIndex = 0;
     onProgress(progressMessages[messageIndex]);
 
