@@ -99,29 +99,26 @@ export const generateImages = async (
         finalPrompt = formatPrompt(template, prompt);
       }
 
-      // Generate images using the automate API
-      for (let i = 0; i < count; i++) {
-        try {
-          const generatedImageUrl = await apiService.generateImageAutomate(
-            {
-              image_url: imageUrl,
-              prompt: finalPrompt
-            },
-            {
-              onProgress: (progress, status) => {
-                console.log(`Image ${i + 1}/${count} - Progress: ${progress}%, Status: ${status}`);
-              }
+      // Generate images using the automate API in parallel
+      const generatePromises = Array.from({ length: count }, (_, i) =>
+        apiService.generateImageAutomate(
+          {
+            image_url: imageUrl,
+            prompt: finalPrompt
+          },
+          {
+            onProgress: (progress, status) => {
+              console.log(`Image ${i + 1}/${count} - Progress: ${progress}%, Status: ${status}`);
             }
-          );
-          results.push(generatedImageUrl);
-        } catch (error) {
+          }
+        ).catch((error) => {
           console.error(`Failed to generate image ${i + 1}/${count} with automate API:`, error);
-          // Fall back to old method if automate API fails
           throw error;
-        }
-      }
+        })
+      );
 
-      return results;
+      const generatedUrls = await Promise.all(generatePromises);
+      return generatedUrls;
     } catch (error) {
       console.warn("Automate API failed, falling back to old method:", error);
       // Fall through to old method
@@ -137,7 +134,6 @@ export const generateImages = async (
   // For cases without source image, we can't use automate API (it requires an image)
   // So we keep the old method for these cases
   if (!sourceImage || referenceImage) {
-    const fallbackResults: (string | null)[] = [];
     let finalAspectRatio = aspectRatio;
     if (finalAspectRatio === 'auto') {
         if (sourceImage) finalAspectRatio = await getClosestAspectRatio(sourceImage);
@@ -147,42 +143,51 @@ export const generateImages = async (
     const imageConfig: any = { aspectRatio: finalAspectRatio };
     if (modelName === 'gemini-3-pro-image-preview') imageConfig.imageSize = imageSize;
 
-    for (let i = 0; i < count; i++) {
+    // Prepare base64 images once before parallel generation
+    const sourceBase64 = sourceImage ? await ensureBase64(sourceImage) : null;
+    const refBase64 = referenceImage ? await ensureBase64(referenceImage) : null;
+
+    // Build engineered prompt once
+    let engineeredPrompt = prompt;
+    if (sourceImage) {
+      if (referenceImage) {
+        const template = (negativePrompt && negativePrompt.trim() !== '')
+          ? translations.en.engineeredPrompts.generateWithReferenceNegative
+          : translations.en.engineeredPrompts.generateWithReference;
+        engineeredPrompt = formatPrompt(template, prompt, negativePrompt);
+      } else {
+        const template = (negativePrompt && negativePrompt.trim() !== '')
+          ? translations.en.engineeredPrompts.generateWithoutReferenceNegative
+          : translations.en.engineeredPrompts.generateWithoutReference;
+        engineeredPrompt = formatPrompt(template, prompt, negativePrompt);
+      }
+    } else {
+      if (negativePrompt && negativePrompt.trim() !== '') {
+        engineeredPrompt = `${prompt} (Do not include: ${negativePrompt})`;
+      }
+    }
+
+    // Generate images in parallel
+    const generatePromises = Array.from({ length: count }, async (_, i) => {
       try {
         let parts: any[] = [];
-        let engineeredPrompt = prompt;
 
-        if (sourceImage) {
-          const sourceBase64 = await ensureBase64(sourceImage);
+        if (sourceBase64) {
           parts.push({
             inlineData: {
               data: sourceBase64,
-              mimeType: sourceImage.mimeType,
+              mimeType: sourceImage!.mimeType,
             },
           });
 
-          if (referenceImage) {
-              const refBase64 = await ensureBase64(referenceImage);
-              parts.push({
-                  inlineData: {
-                      data: refBase64,
-                      mimeType: referenceImage.mimeType,
-                  },
-              });
-              const template = (negativePrompt && negativePrompt.trim() !== '')
-                  ? translations.en.engineeredPrompts.generateWithReferenceNegative
-                  : translations.en.engineeredPrompts.generateWithReference;
-              engineeredPrompt = formatPrompt(template, prompt, negativePrompt);
-          } else {
-              const template = (negativePrompt && negativePrompt.trim() !== '')
-                  ? translations.en.engineeredPrompts.generateWithoutReferenceNegative
-                  : translations.en.engineeredPrompts.generateWithoutReference;
-              engineeredPrompt = formatPrompt(template, prompt, negativePrompt);
+          if (refBase64) {
+            parts.push({
+              inlineData: {
+                data: refBase64,
+                mimeType: referenceImage!.mimeType,
+              },
+            });
           }
-        } else {
-            if (negativePrompt && negativePrompt.trim() !== '') {
-                engineeredPrompt = `${prompt} (Do not include: ${negativePrompt})`;
-            }
         }
 
         parts.push({ text: engineeredPrompt });
@@ -195,12 +200,14 @@ export const generateImages = async (
             imageConfig: imageConfig
           },
         });
-        fallbackResults.push(extractBase64Image(response));
+        return extractBase64Image(response);
       } catch (error) {
         console.error(`Failed to generate image ${i + 1}/${count}:`, error);
+        return null;
       }
-    }
+    });
 
+    const fallbackResults = await Promise.all(generatePromises);
     return fallbackResults.filter((result): result is string => result !== null);
   }
 
@@ -217,24 +224,26 @@ export const generateImages = async (
       finalPrompt = formatPrompt(template, prompt);
     }
 
-    for (let i = 0; i < count; i++) {
-      try {
-        const generatedImageUrl = await apiService.generateImageAutomate(
-          {
-            image_url: imageUrl,
-            prompt: finalPrompt
-          },
-          {
-            onProgress: (progress, status) => {
-              console.log(`Image ${i + 1}/${count} - Progress: ${progress}%, Status: ${status}`);
-            }
+    // Generate images in parallel using Promise.all
+    const generatePromises = Array.from({ length: count }, (_, i) =>
+      apiService.generateImageAutomate(
+        {
+          image_url: imageUrl,
+          prompt: finalPrompt
+        },
+        {
+          onProgress: (progress, status) => {
+            console.log(`Image ${i + 1}/${count} - Progress: ${progress}%, Status: ${status}`);
           }
-        );
-        results.push(generatedImageUrl);
-      } catch (error) {
+        }
+      ).catch((error) => {
         console.error(`Failed to generate image ${i + 1}/${count} with automate API:`, error);
-      }
-    }
+        return null;
+      })
+    );
+
+    const generatedUrls = await Promise.all(generatePromises);
+    results.push(...generatedUrls.filter((url): url is string => url !== null));
   } catch (error) {
     console.error("Failed to use automate API:", error);
   }
