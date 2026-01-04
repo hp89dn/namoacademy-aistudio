@@ -14,7 +14,7 @@ function formatPrompt(template: string, ...args: any[]): string {
 }
 
 function prependFromUploadedImage(prompt: string): string {
-    return `From uploaded image ${prompt}`;
+    return `From uploaded image, ${prompt}, The requirements include maintaining the architectural geometric elements, adhering closely to the color and material specifications in the sketch, and ensuring the interior lighting corresponds to the placement of the lights.`;
 }
 
 const getClosestAspectRatio = async (sourceImage: SourceImage): Promise<string> => {
