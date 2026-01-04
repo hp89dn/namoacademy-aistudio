@@ -13,6 +13,10 @@ function formatPrompt(template: string, ...args: any[]): string {
     });
 }
 
+function prependFromUploadedImage(prompt: string): string {
+    return `From uploaded image ${prompt}`;
+}
+
 const getClosestAspectRatio = async (sourceImage: SourceImage): Promise<string> => {
     const base64 = await ensureBase64(sourceImage);
     return new Promise((resolve) => {
@@ -104,7 +108,7 @@ export const generateImages = async (
         apiService.generateImageAutomate(
           {
             image_url: imageUrl,
-            prompt: finalPrompt
+            prompt: prependFromUploadedImage(finalPrompt)
           },
           {
             onProgress: (progress, status) => {
@@ -190,7 +194,7 @@ export const generateImages = async (
           }
         }
 
-        parts.push({ text: engineeredPrompt });
+        parts.push({ text: prependFromUploadedImage(engineeredPrompt) });
 
         // Using custom API service (old method for unsupported cases)
         const response = await apiService.generateContent({
@@ -229,7 +233,7 @@ export const generateImages = async (
       apiService.generateImageAutomate(
         {
           image_url: imageUrl,
-          prompt: finalPrompt
+          prompt: prependFromUploadedImage(finalPrompt)
         },
         {
           onProgress: (progress, status) => {
@@ -268,7 +272,7 @@ export const generateSketch = async (
         const generatedImageUrl = await apiService.generateImageAutomate(
             {
                 image_url: imageUrl,
-                prompt: engineeredPrompt
+                prompt: prependFromUploadedImage(engineeredPrompt)
             },
             {
                 onProgress: (progress, status) => {
@@ -308,7 +312,7 @@ export const generateVideo = async (
     const apiService = createCustomApiService();
     let operation = await apiService.generateVideos({
       model: veoModel,
-      prompt: prompt,
+      prompt: prependFromUploadedImage(prompt),
       image: {
         imageBytes: base64,
         mimeType: sourceImage.mimeType,
@@ -351,7 +355,7 @@ export const classifyImageType = async (
     const engineeredPrompt = translations.en.engineeredPrompts.classifyImageTypePrompt;
     const parts: any[] = [
       { inlineData: { data: base64, mimeType: sourceImage.mimeType } },
-      { text: engineeredPrompt },
+      { text: prependFromUploadedImage(engineeredPrompt) },
     ];
 
     // Using custom API service
@@ -379,7 +383,7 @@ export const generatePromptFromImage = async (
     const engineeredPrompt = translations.en.engineeredPrompts[templateKey];
     const parts: any[] = [
       { inlineData: { data: base64, mimeType: sourceImage.mimeType } },
-      { text: engineeredPrompt },
+      { text: prependFromUploadedImage(engineeredPrompt) },
     ];
 
     // Using custom API service
@@ -450,7 +454,7 @@ export const editImage = async (
         engineeredPrompt = formatPrompt(template, prompt);
     }
     
-    parts.push({ text: engineeredPrompt });
+    parts.push({ text: prependFromUploadedImage(engineeredPrompt) });
     
     try {
         // Using custom API service (old method - automate API doesn't support masks)
@@ -489,7 +493,7 @@ export const mergeImages = async (
         const generatedImageUrl = await apiService.generateImageAutomate(
           {
             image_url: imageUrl,
-            prompt: mergePrompt
+            prompt: prependFromUploadedImage(mergePrompt)
           },
           {
             onProgress: (progress, status) => {
@@ -506,7 +510,7 @@ export const mergeImages = async (
         const parts: any[] = [
           { inlineData: { data: base64_1, mimeType: image1.mimeType } },
           { inlineData: { data: base64_2, mimeType: image2.mimeType } },
-          { text: prompt },
+          { text: prependFromUploadedImage(prompt) },
         ];
         const response = await apiService.generateContent({
           model: 'gemini-2.5-flash-image',
@@ -527,7 +531,7 @@ export const mergeImages = async (
       const parts: any[] = [
         { inlineData: { data: base64_1, mimeType: image1.mimeType } },
         { inlineData: { data: base64_2, mimeType: image2.mimeType } },
-        { text: prompt },
+        { text: prependFromUploadedImage(prompt) },
       ];
 
       try {
@@ -579,7 +583,7 @@ export const placeAndRenderFurniture = async (
         const generatedImageUrl = await apiService.generateImageAutomate(
           {
             image_url: imageUrl,
-            prompt: engineeredPrompt
+            prompt: prependFromUploadedImage(engineeredPrompt)
           },
           {
             onProgress: (progress, status) => {
@@ -598,7 +602,7 @@ export const placeAndRenderFurniture = async (
         const parts: any[] = [
             { inlineData: { data: bgBase64, mimeType: bgImage.mimeType } },
             ...placementParts,
-            { text: engineeredPrompt },
+            { text: prependFromUploadedImage(engineeredPrompt) },
         ];
         const response = await apiService.generateContent({
           model: 'gemini-2.5-flash-image',
@@ -621,7 +625,7 @@ export const placeAndRenderFurniture = async (
       const parts: any[] = [
           { inlineData: { data: bgBase64, mimeType: bgImage.mimeType } },
           ...placementParts,
-          { text: engineeredPrompt },
+          { text: prependFromUploadedImage(engineeredPrompt) },
       ];
       
       try {
@@ -649,7 +653,7 @@ export const analyzeCharacterImage = async (
         const engineeredPrompt = translations.en.engineeredPrompts.analyzeCharacterPrompt;
         const parts: any[] = [
             { inlineData: { data: base64, mimeType: characterImage.mimeType } },
-            { text: engineeredPrompt },
+            { text: prependFromUploadedImage(engineeredPrompt) },
         ];
         // Using custom API service
         const apiService = createCustomApiService();
@@ -673,7 +677,7 @@ export const analyzeImageArea = async (
         const engineeredPrompt = translations.en.engineeredPrompts.analyzeAreaPrompt;
         const parts: any[] = [
             { inlineData: { data: base64, mimeType: areaImage.mimeType } },
-            { text: engineeredPrompt },
+            { text: prependFromUploadedImage(engineeredPrompt) },
         ];
         // Using custom API service
         const apiService = createCustomApiService();
@@ -699,7 +703,7 @@ export const generateArchitecturalPrompts = async (
         const engineeredPrompt = formatPrompt(template, characterDescription);
         const parts: any[] = [
             { inlineData: { data: base64, mimeType: sourceImage.mimeType } },
-            { text: engineeredPrompt },
+            { text: prependFromUploadedImage(engineeredPrompt) },
         ];
 
         // Using custom API service
@@ -728,7 +732,7 @@ export const generatePromptFromPlan = async (
     const engineeredPrompt = translations.en.engineeredPrompts.generateFromPlan;
     const parts: any[] = [
       { inlineData: { data: base64, mimeType: sourceImage.mimeType } },
-      { text: engineeredPrompt },
+      { text: prependFromUploadedImage(engineeredPrompt) },
     ];
     // Using custom API service
     const apiService = createCustomApiService();
@@ -765,7 +769,7 @@ export const generateMoodboard = async (
           const generatedImageUrl = await apiService.generateImageAutomate(
             {
               image_url: imageUrl,
-              prompt: engineeredPrompt
+              prompt: prependFromUploadedImage(engineeredPrompt)
             },
             {
               onProgress: (progress, status) => {
@@ -804,7 +808,7 @@ export const generateMoodboard = async (
       engineeredPrompt = formatPrompt(template, userPrompt);
     }
 
-    parts.push({ text: engineeredPrompt });
+    parts.push({ text: prependFromUploadedImage(engineeredPrompt) });
     
     try {
       const response = await apiService.generateContent({
@@ -838,7 +842,7 @@ export const applyLighting = async (
         const generatedImageUrl = await apiService.generateImageAutomate(
           {
             image_url: imageUrl,
-            prompt: engineeredPrompt
+            prompt: prependFromUploadedImage(engineeredPrompt)
           },
           {
             onProgress: (progress, status) => {
@@ -853,7 +857,7 @@ export const applyLighting = async (
         const base64 = await ensureBase64(sourceImage);
         const parts: any[] = [
           { inlineData: { data: base64, mimeType: sourceImage.mimeType } },
-          { text: engineeredPrompt }
+          { text: prependFromUploadedImage(engineeredPrompt) }
         ];
         const response = await apiService.generateContent({
           model: 'gemini-2.5-flash-image',
@@ -872,7 +876,7 @@ export const applyLighting = async (
     for (let i = 0; i < imageCount; i++) {
       const parts: any[] = [
         { inlineData: { data: base64, mimeType: sourceImage.mimeType } },
-        { text: engineeredPrompt }
+        { text: prependFromUploadedImage(engineeredPrompt) }
       ];
       
       try {
@@ -901,7 +905,7 @@ export const generateVideoScriptPrompt = async (
     const engineeredPrompt = `hãy đóng vai một đạo diễn chuyên về quay phim kiến trúc,nội thất với hơn 20 năm kinh nghiệm và một chuyên gia viết promt chuyển từ ảnh thành video ngắn cho các ai kling và veo 3, bạn có kinh nghiệm về các góc camera, chuyển động của ánh sáng, bố cục và dựa vào tài liệu hàng đầu về nhiếp ảnh kiến trúc, nội thất. Khi tôi tải ảnh lên + yêu cầu bằng tiếng việt bạn hãy đựa vào đó viết promt tạo chuyển động cho ảnh theo chỉ định bằng tiếng anh, chỉ hiện promt ko hiện phân tích. Yêu cầu của người dùng là: "${userPrompt}"`;
     const parts: any[] = [
       { inlineData: { data: base64, mimeType: sourceImage.mimeType } },
-      { text: engineeredPrompt },
+      { text: prependFromUploadedImage(engineeredPrompt) },
     ];
 
     // Using custom API service
@@ -943,7 +947,7 @@ export const extendView = async (
         const generatedImageUrl = await apiService.generateImageAutomate(
           {
             image_url: imageUrl,
-            prompt: engineeredPrompt
+            prompt: prependFromUploadedImage(engineeredPrompt)
           },
           {
             onProgress: (progress, status) => {
@@ -958,7 +962,7 @@ export const extendView = async (
         const base64 = await ensureBase64(paddedImage);
         const parts: any[] = [
           { inlineData: { data: base64, mimeType: paddedImage.mimeType } },
-          { text: engineeredPrompt }
+          { text: prependFromUploadedImage(engineeredPrompt) }
         ];
         const response = await apiService.generateContent({
           model: 'gemini-2.5-flash-image',
@@ -977,7 +981,7 @@ export const extendView = async (
     for (let i = 0; i < imageCount; i++) {
       const parts: any[] = [
         { inlineData: { data: base64, mimeType: paddedImage.mimeType } },
-        { text: engineeredPrompt }
+        { text: prependFromUploadedImage(engineeredPrompt) }
       ];
       
       try {
@@ -1007,7 +1011,7 @@ export const generateStyleChangePrompt = async (
     const engineeredPrompt = formatPrompt(template, userPrompt);
     const parts: any[] = [
       { inlineData: { data: base64, mimeType: sourceImage.mimeType } },
-      { text: engineeredPrompt },
+      { text: prependFromUploadedImage(engineeredPrompt) },
     ];
 
     // Using custom API service
